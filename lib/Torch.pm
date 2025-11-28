@@ -10,6 +10,8 @@ use Inline 'C';      # XS integration for speed-critical ops
 use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
 
+our $VERSION = '0.01';
+
 # Inline C for fast ops: Compile C code inline for Perl, optimizing numerical hotspots
 __END__
 __C__
