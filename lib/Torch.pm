@@ -11,15 +11,18 @@ use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
 our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
-$Torch::pdl_core_inc = "$Config{sitearchexp}/auto/PDL/Core";
-#use Inline 'C' => 'DATA';  # XS integration for speed-critical ops
+use Inline 'C' => 'DATA';
+use Inline 'C' => config => inc => "-I$Config{sitearchexp}/auto/PDL/Core";
+;  # XS integration for speed-critical ops
 
 # Basic Tensor class, wrapping PDL with autograd
 {
     package Torch::Tensor;
     use overload
         '+' => \&add,
+        '-' => \&subtract,  # FIX: Added overload for subtraction
         '*' => \&mul,
+        '**' => \&power,     # FIX: Added overload for exponentiation (used in pow)
         '""' => sub { $_[0]->{data} };
 
     sub new {
@@ -36,7 +39,9 @@ $Torch::pdl_core_inc = "$Config{sitearchexp}/auto/PDL/Core";
 
     sub Torch::tensor {
         my ($data, %opts) = @_;
-        my $pdl_data = ref $data eq 'ARRAY' ? pdl($data) : $data;
+        # FIX: Properly handle scalars, array refs, and existing PDLs using topdl for safety
+        use PDL::Core;
+        my $pdl_data = PDL::Core::topdl($data);
         $pdl_data = $pdl_data->convert($opts{type} // 'float');
         Torch::Tensor->new(
             data => $pdl_data,
@@ -92,6 +97,28 @@ $Torch::pdl_core_inc = "$Config{sitearchexp}/auto/PDL/Core";
         $out;
     }
 
+    # FIX: Added subtract method with overload support
+    sub subtract {
+        my ($self, $other, $swap) = @_;
+        if ($swap) {  # Handle other - self if swapped
+            return $other->subtract($self);
+        }
+        $other = Torch::tensor($other) unless ref $other eq 'Torch::Tensor';
+        my $out_data = $self->{data} - $other->{data};  # PDL broadcast
+        my $out = Torch::Tensor->new(
+            data => $out_data,
+            _prev => [$self, $other],
+            _op => '-',
+            requires_grad => $self->requires_grad || $other->requires_grad,
+        );
+        $out->{_backward} = sub {
+            my $node = shift;
+            $self->{grad} += $node->{grad} if $self->requires_grad;
+            $other->{grad} -= $node->{grad} if $other->requires_grad;
+        };
+        $out;
+    }
+
     # Mul: Similar, can add XS fast_mul if needed
     sub mul {
         my ($self, $other) = @_;
@@ -106,6 +133,50 @@ $Torch::pdl_core_inc = "$Config{sitearchexp}/auto/PDL/Core";
             my $node = shift;
             $self->{grad} += $other->{data} * $node->{grad} if $self->requires_grad;
             $other->{grad} += $self->{data} * $node->{grad} if $other->requires_grad;
+        };
+        $out;
+    }
+
+    # FIX: Added power (pow) method with overload support; assumes exponent is constant/scalar for simplicity
+    sub power {
+        my ($self, $exp, $swap) = @_;
+        if ($swap) {  # No support for exp ** self yet
+            die "Swapped power not supported";
+        }
+        $exp = Torch::tensor($exp) unless ref $exp eq 'Torch::Tensor';
+        my $out_data = $self->{data} ** $exp->{data};
+        my $out = Torch::Tensor->new(
+            data => $out_data,
+            _prev => [$self, $exp],
+            _op => '**',
+            requires_grad => $self->requires_grad,
+        );
+        $out->{_backward} = sub {
+            my $node = shift;
+            if ($self->requires_grad) {
+                $self->{grad} += ($exp->{data} * ($self->{data} ** ($exp->{data} - 1))) * $node->{grad};
+            }
+        };
+        $out;
+    }
+
+    sub pow { goto &power; }  # Alias for convenience
+
+    # FIX: Added sum method for loss aggregation
+    sub sum {
+        my $self = shift;
+        my $out_data = $self->{data}->sum;
+        my $out = Torch::Tensor->new(
+            data => $out_data,
+            _prev => [$self],
+            _op => 'sum',
+            requires_grad => $self->requires_grad,
+        );
+        $out->{_backward} = sub {
+            my $node = shift;
+            if ($self->requires_grad) {
+                $self->{grad} += ones_like($self->{data}) * $node->{grad};
+            }
         };
         $out;
     }
@@ -309,86 +380,82 @@ package Torch::NN::BatchNorm1d {
 package Torch::NN::Sequential {
     our @ISA = qw(Torch::NN::Module);
     sub new {
-        my ($class, @layers) = @_;
-        bless { layers => \@layers }, $class;
+        my ($class, @modules) = @_;
+        bless { modules => \@modules }, $class;
     }
 
     sub forward {
         my ($self, $input) = @_;
-        my $x = $input;
-        $x = $_->forward($x) for @{$self->{layers}};
-        $x;
+        my $out = $input;
+        for my $module (@{$self->{modules}}) {
+            $out = $module->forward($out);
+        }
+        $out;
     }
 
     sub parameters {
         my $self = shift;
         my @params;
-        push @params, $_->parameters for @{$self->{layers}};
+        push @params, $_->parameters for @{$self->{modules}};
         @params;
     }
 }
 
-use Inline with => 'PDL';
-#use Inline C => config => inc => "-I$Torch::pdl_core_inc" => <<'END_C';
-use Inline C => <<'END_C';
+# Inline C section (assuming you have this for fast_add, fast_matmul, etc.)
+__DATA__
+__C__
+#include <pdlcore.h>
 
-#include "pdl.h"
-#include "pdlcore.h"
+static StaticPdlSym *PDL;
 
-/* Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency */
-void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
-    pdl *a_pdl = pdl_SvPDLV(a_sv);
-    pdl *b_pdl = pdl_SvPDLV(b_sv);
-    pdl *out_pdl = pdl_SvPDLV(out_sv);
-
-    PDL_Long *dims;
-    int ndims, i;
-    PDL_Indx size = 1;  /* Use PDL_Indx for sizes/indices */
-
-    PDL_Double *a_data, *b_data, *out_data;
-
-    /* Basic checks (add more for shape/type matching in production) */
-    if (a_pdl->datatype != PDL_D || b_pdl->datatype != PDL_D || out_pdl->datatype != PDL_D) {
-        croak("fast_add: All inputs must be double type");
+void fast_add(SV* sv_a, SV* sv_b, SV* sv_out) {
+    if (!PDL) PDL = get_pdl_syms();
+    pdl* a = PDL->SvPDLV(sv_a);
+    pdl* b = PDL->SvPDLV(sv_b);
+    pdl* out = PDL->SvPDLV(sv_out);
+    PDL->make_physical(a);
+    PDL->make_physical(b);
+    PDL->make_physical(out);
+    if (a->nvals != b->nvals || a->nvals != out->nvals) {
+        croak("fast_add: mismatched element counts");
     }
-
-    ndims = a_pdl->ndims;
-    dims = a_pdl->dims;
-
-    for (i = 0; i < ndims; i++) {
-        size *= dims[i];
-    }
-
-    /* Assuming same dims as 'a' for b/out; add checks if needed */
-    a_data = (PDL_Double *) a_pdl->data;
-    b_data = (PDL_Double *) b_pdl->data;
-    out_data = (PDL_Double *) out_pdl->data;
-
-    for (i = 0; i < size; i++) {
-        out_data[i] = a_data[i] + b_data[i];
+    float* data_a = (float*) a->data;
+    float* data_b = (float*) b->data;
+    float* data_out = (float*) out->data;
+    int i;
+    for (i = 0; i < a->nvals; i++) {
+        data_out[i] = data_a[i] + data_b[i];
     }
 }
 
-END_C
-1;
-__END__
-
-=head1 NAME
-
-Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
-
-=head1 SYNOPSIS
-
-  use Torch qw(tensor);
-  my $model = Torch::NN::Sequential->new(
-      Torch::NN::Conv2d->new(3, 16, 3),
-      Torch::NN::MaxPool2d->new(2),
-      Torch::NN::Linear->new(16*..., 10),  # Adjust dims
-  );
-  # Train with XS-accelerated ops for speed
-
-=head1 DESCRIPTION
-
-Updated draft adds Conv2d (via PDL conv2d), MaxPool2d, BatchNorm1d, Sigmoid, and Sequential. XS via Inline::C optimizes add/matmul for denser, faster execution than Python equivalents.
-
-=cut
+void fast_matmul(SV* sv_a, SV* sv_b, SV* sv_out) {
+    if (!PDL) PDL = get_pdl_syms();
+    pdl* a = PDL->SvPDLV(sv_a);
+    pdl* b = PDL->SvPDLV(sv_b);
+    pdl* out = PDL->SvPDLV(sv_out);
+    PDL->make_physical(a);
+    PDL->make_physical(b);
+    PDL->make_physical(out);
+    if (a->ndims != 2 || b->ndims != 2 || out->ndims != 2) {
+        croak("fast_matmul: requires 2D piddles");
+    }
+    PDL_Long m = a->dims[0];
+    PDL_Long n = a->dims[1];
+    PDL_Long p = b->dims[1];
+    if (b->dims[0] != n || out->dims[0] != m || out->dims[1] != p) {
+        croak("fast_matmul: dimension mismatch");
+    }
+    float* data_a = (float*) a->data;
+    float* data_b = (float*) b->data;
+    float* data_out = (float*) out->data;
+    int i, j, k;
+    for (i = 0; i < m; i++) {
+        for (j = 0; j < p; j++) {
+            float sum = 0.0;
+            for (k = 0; k < n; k++) {
+                sum += data_a[i * n + k] * data_b[k * p + j];
+            }
+            data_out[i * p + j] = sum;
+        }
+    }
+}
