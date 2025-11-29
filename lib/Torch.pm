@@ -12,7 +12,7 @@ our @EXPORT_OK = qw(tensor);
 our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
 use Inline 'C' => 'DATA';
-use Inline 'C' => config => inc => "-I$Config{sitearchexp}/auto/PDL/Core";
+use Inline 'C' => config => inc => "-I$Config{sitearchexp}/PDL/Core";
 ;  # XS integration for speed-critical ops
 
 # Basic Tensor class, wrapping PDL with autograd
