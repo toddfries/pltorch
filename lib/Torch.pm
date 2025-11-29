@@ -9,33 +9,39 @@ use PDL::Image2D;    # Added for Conv2D support
 use Inline 'C';      # XS integration for speed-critical ops
 use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
+our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
-our $VERSION = '0.01';
-
-# Inline C for fast ops: Compile C code inline for Perl, optimizing numerical hotspots
-__END__
-__C__
+Inline::C->bind(<<'END_C');  # Use heredoc for Inline C to avoid DATA/__END__ parsing issues
 // Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency
 void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
-    PDL_Long dims[PDL_NDIMS];  // Assume matching dims for simplicity
+    PDL_Long *dims;
+    int ndims, size;
     PDL_Double *a_data, *b_data, *out_data;
-    PDL->sv2c(a_sv, dims, &a_data);  // Pseudo: Actual via PDL API
-    PDL->sv2c(b_sv, dims, &b_data);
-    PDL->sv2c(out_sv, dims, &out_data);
-    int size = PDL->nelem(dims);
+    PDL *a_pdl = PDL->SvPDLV(a_sv);
+    PDL *b_pdl = PDL->SvPDLV(b_sv);
+    PDL *out_pdl = PDL->SvPDLV(out_sv);
+    // Assume matching dims/broadcast; simplified for matching
+    ndims = a_pdl->ndims;
+    dims = a_pdl->dims;
+    size = PDL->nelem(a_pdl);
+    a_data = (PDL_Double *) a_pdl->data;
+    b_data = (PDL_Double *) b_pdl->data;
+    out_data = (PDL_Double *) out_pdl->data;
     for(int i = 0; i < size; i++) {
         out_data[i] = a_data[i] + b_data[i];
     }
 }
 
-// Fast matmul: Basic GEMM-like, can extend with BLAS linkage for more speed
+// Fast matmul: Basic GEMM-like, extend with BLAS if available
 void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
-    // Implement matrix mult here; for prod, link to cblas_dgemm if BLAS avail
-    // Placeholder: Assume 2D, row-major
-    PDL_Long a_dims[2], b_dims[2];
-    PDL_Double *a, *b, *out;
-    // Extract data/dims...
-    int m = a_dims[0], n = b_dims[1], k = a_dims[1];
+    PDL *a_pdl = PDL->SvPDLV(a_sv);
+    PDL *b_pdl = PDL->SvPDLV(b_sv);
+    PDL *out_pdl = PDL->SvPDLV(out_sv);
+    // Assume 2D, row-major; m x k * k x n -> m x n
+    int m = a_pdl->dims[0], k = a_pdl->dims[1], n = b_pdl->dims[1];
+    PDL_Double *a = (PDL_Double *) a_pdl->data;
+    PDL_Double *b = (PDL_Double *) b_pdl->data;
+    PDL_Double *out = (PDL_Double *) out_pdl->data;
     for(int i = 0; i < m; i++) {
         for(int j = 0; j < n; j++) {
             out[i*n + j] = 0;
@@ -45,8 +51,7 @@ void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
         }
     }
 }
-
-__END__
+END_C
 
 # Basic Tensor class, wrapping PDL with autograd
 {
@@ -106,8 +111,8 @@ __END__
         my ($self, $other) = @_;
         $other = Torch::tensor($other) unless ref $other eq 'Torch::Tensor';
         my $out_data;
-        if ($self->{data}->ndims == $other->{data}->ndims) {  # Simple case for XS
-            $out_data = zeroes($self->{data}->dims);
+        if ($self->{data}->ndims == $other->{data}->ndims && $self->{data}->nelem == $other->{data}->nelem) {  # Simple case for XS
+            $out_data = zeroes_like($self->{data});
             fast_add($self->{data}, $other->{data}, $out_data);  # XS call
         } else {
             $out_data = $self->{data} + $other->{data};  # PDL broadcast
@@ -126,7 +131,7 @@ __END__
         $out;
     }
 
-    # Mul: Similar, can add XS fast_mul
+    # Mul: Similar, can add XS fast_mul if needed
     sub mul {
         my ($self, $other) = @_;
         $other = Torch::tensor($other) unless ref $other eq 'Torch::Tensor';
@@ -176,7 +181,7 @@ __END__
     sub relu {
         my $self = shift;
         my $out = Torch::Tensor->new(
-            data => $self->{data}->where($self->{data} > 0)->setbadto(0),
+            data => maximum($self->{data}, 0),  # Dense PDL max for efficiency
             _prev => [$self],
             _op => 'relu',
             requires_grad => $self->requires_grad,
@@ -242,7 +247,7 @@ package Torch::NN::Linear {
     our @ISA = qw(Torch::NN::Module);
     sub new {
         my ($class, $in_features, $out_features) = @_;
-        my $weight = Torch::tensor(random($out_features, $in_features), requires_grad => 1)->quantize(16);
+        my $weight = Torch::tensor(grandom($out_features, $in_features), requires_grad => 1)->quantize(16);
         my $bias = Torch::tensor(zeros($out_features), requires_grad => 1);
         bless { weight => $weight, bias => $bias }, $class;
     }
@@ -253,34 +258,46 @@ package Torch::NN::Linear {
     }
 }
 
-# Added: Conv2D layer using PDL::Image2D for efficiency
+# Added: ReLU module for Sequential
+package Torch::NN::ReLU {
+    our @ISA = qw(Torch::NN::Module);
+    sub new {
+        bless {}, shift;
+    }
+
+    sub forward {
+        my ($self, $input) = @_;
+        $input->relu;
+    }
+}
+
+# Conv2D, MaxPool2d, BatchNorm1d, Sequential as before...
 package Torch::NN::Conv2d {
     our @ISA = qw(Torch::NN::Module);
     sub new {
         my ($class, $in_channels, $out_channels, $kernel_size) = @_;
-        my $weight = Torch::tensor(random($out_channels, $in_channels, $kernel_size, $kernel_size), requires_grad => 1)->quantize(16);
+        my $weight = Torch::tensor(grandom($out_channels, $in_channels, $kernel_size, $kernel_size), requires_grad => 1)->quantize(16);
         my $bias = Torch::tensor(zeros($out_channels), requires_grad => 1);
         bless { weight => $weight, bias => $bias }, $class;
     }
 
     sub forward {
         my ($self, $input) = @_;
-        # Assume input: (batch, channels, height, width)
-        my $out = zeroes($input->dim(0), $self->{weight}->dim(0), $input->dim(2) - $self->{weight}->dim(2) + 1, $input->dim(3) - $self->{weight}->dim(3) + 1);
-        for my $b (0 .. $input->dim(0)-1) {
-            for my $o (0 .. $self->{weight}->dim(0)-1) {
-                my $conv_sum = zeroes($out->dim(2), $out->dim(3));
-                for my $i (0 .. $input->dim(1)-1) {
-                    $conv_sum += conv2d($input(:,:,$b,$i), $self->{weight}->(:,$o,$i,:));  # PDL conv2d
+        # Assume input: (batch, height, width, channels) adjust if needed; simplified loop for test
+        my $out = zeroes($input->dim(0), $input->dim(1) - $self->{weight}->dim(2) + 1, $input->dim(2) - $self->{weight}->dim(3) + 1, $self->{weight}->dim(0));
+        for my $b (0..$input->dim(0)-1) {
+            for my $o (0..$self->{weight}->dim(0)-1) {
+                my $conv_sum = zeroes($out->dim(1), $out->dim(2));
+                for my $i (0..$input->dim(3)-1) {
+                    $conv_sum += conv2d($input->(:,:,:,$b,$i), $self->{weight}->(:,:,$o,$i));  # Adjust slices
                 }
-                $out(:,:,$b,$o) .= $conv_sum + $self->{bias}->at($o);
+                $out->(:,:,$o,$b) .= $conv_sum + $self->{bias}->at($o);
             }
         }
         Torch::Tensor->new(data => $out, requires_grad => $input->requires_grad);
     }
 }
 
-# Added: MaxPool2D
 package Torch::NN::MaxPool2d {
     our @ISA = qw(Torch::NN::Module);
     sub new {
@@ -291,19 +308,18 @@ package Torch::NN::MaxPool2d {
     sub forward {
         my ($self, $input) = @_;
         my $ks = $self->{kernel_size};
-        my $out_h = int($input->dim(2) / $ks);
-        my $out_w = int($input->dim(3) / $ks);
-        my $out = zeroes($input->dim(0), $input->dim(1), $out_h, $out_w);
-        for my $i (0 .. $out_h-1) {
-            for my $j (0 .. $out_w-1) {
-                $out(:,:,$i,$j) .= $input(:,:,$i*$ks:($i+1)*$ks-1, $j*$ks:($j+1)*$ks-1)->maximum;
+        my $out_h = int($input->dim(1) / $ks);
+        my $out_w = int($input->dim(2) / $ks);
+        my $out = zeroes($input->dim(0), $out_h, $out_w, $input->dim(3));
+        for my $i (0..$out_h-1) {
+            for my $j (0..$out_w-1) {
+                $out->(:, $i, $j, :) .= $input->(:, $i*$ks:($i+1)*$ks-1, $j*$ks:($j+1)*$ks-1, :)->maximum_nd( [1,2] );
             }
         }
         Torch::Tensor->new(data => $out, requires_grad => $input->requires_grad);
     }
 }
 
-# Added: BatchNorm1d for normalization
 package Torch::NN::BatchNorm1d {
     our @ISA = qw(Torch::NN::Module);
     sub new {
@@ -317,20 +333,18 @@ package Torch::NN::BatchNorm1d {
 
     sub forward {
         my ($self, $input, $training) = @_;
+        $training //= 0;
+        my $mean = $training ? $input->mean(0) : $self->{running_mean};
+        my $var = $training ? (($input - $mean)**2)->mean(0) : $self->{running_var};
         if ($training) {
-            my $mean = $input->mean(0);
-            my $var = (($input - $mean)**2)->mean(0);
             $self->{running_mean} .= (1 - $self->{momentum}) * $self->{running_mean} + $self->{momentum} * $mean;
             $self->{running_var} .= (1 - $self->{momentum}) * $self->{running_var} + $self->{momentum} * $var;
-            my $norm = ($input - $mean) / sqrt($var + 1e-5);
-        } else {
-            my $norm = ($input - $self->{running_mean}) / sqrt($self->{running_var} + 1e-5);
         }
+        my $norm = ($input - $mean) / sqrt($var + 1e-5);
         $self->{gamma} * $norm + $self->{beta};
     }
 }
 
-# Added: Sequential for stacking layers
 package Torch::NN::Sequential {
     our @ISA = qw(Torch::NN::Module);
     sub new {
@@ -367,7 +381,7 @@ Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
   my $model = Torch::NN::Sequential->new(
       Torch::NN::Conv2d->new(3, 16, 3),
       Torch::NN::MaxPool2d->new(2),
-      Torch::NN::Linear->new(16*... , 10),  # Adjust dims
+      Torch::NN::Linear->new(16*..., 10),  # Adjust dims
   );
   # Train with XS-accelerated ops for speed
 
