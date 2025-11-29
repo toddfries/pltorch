@@ -2,6 +2,7 @@ package Torch;
 
 use strict;
 use warnings;
+use Config;
 use PDL;  # Core for dense, efficient tensor storage and ops
 use PDL::NiceSlice;  # For intuitive slicing
 use PDL::MatrixOps;  # For matrix operations
@@ -10,7 +11,8 @@ use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
 our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
-use Inline 'C' => 'DATA';  # XS integration for speed-critical ops
+$Torch::pdl_core_inc = "$Config{sitearchexp}/auto/PDL/Core";
+#use Inline 'C' => 'DATA';  # XS integration for speed-critical ops
 
 # Basic Tensor class, wrapping PDL with autograd
 {
@@ -326,72 +328,49 @@ package Torch::NN::Sequential {
     }
 }
 
-1;
-__DATA__
-__C__
-#include <stdio.h>
+use Inline with => 'PDL';
+#use Inline C => config => inc => "-I$Torch::pdl_core_inc" => <<'END_C';
+use Inline C => <<'END_C';
 
-// Example: Basic weight initialization (mirroring PyTorch's uniform_ but in dense C arrays for efficiency)
-// Allocate a 2D array (rows x cols) and fill with uniform random values in [a, b)
-double** init_weights(int rows, int cols, double a, double b) {
-    double** weights = (double**)malloc(rows * sizeof(double*));
-    for (int i = 0; i < rows; i++) {
-        weights[i] = (double*)malloc(cols * sizeof(double));
-        for (int j = 0; j < cols; j++) {
-            weights[i][j] = a + (b - a) * ((double)rand() / RAND_MAX);
-        }
-    }
-    return weights;
-}
+#include "pdl.h"
+#include "pdlcore.h"
 
-// Free the weights to avoid leaks
-void free_weights(double** weights, int rows) {
-    for (int i = 0; i < rows; i++) {
-        free(weights[i]);
-    }
-    free(weights);
-}
-
-# Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency
+/* Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency */
 void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
+    pdl *a_pdl = pdl_SvPDLV(a_sv);
+    pdl *b_pdl = pdl_SvPDLV(b_sv);
+    pdl *out_pdl = pdl_SvPDLV(out_sv);
+
     PDL_Long *dims;
-    int ndims, size;
+    int ndims, i;
+    PDL_Indx size = 1;  /* Use PDL_Indx for sizes/indices */
+
     PDL_Double *a_data, *b_data, *out_data;
-    PDL *a_pdl = PDL->SvPDLV(a_sv);
-    PDL *b_pdl = PDL->SvPDLV(b_sv);
-    PDL *out_pdl = PDL->SvPDLV(out_sv);
-    // Assume matching dims/broadcast; simplified for matching
+
+    /* Basic checks (add more for shape/type matching in production) */
+    if (a_pdl->datatype != PDL_D || b_pdl->datatype != PDL_D || out_pdl->datatype != PDL_D) {
+        croak("fast_add: All inputs must be double type");
+    }
+
     ndims = a_pdl->ndims;
     dims = a_pdl->dims;
-    size = PDL->nelem(a_pdl);
+
+    for (i = 0; i < ndims; i++) {
+        size *= dims[i];
+    }
+
+    /* Assuming same dims as 'a' for b/out; add checks if needed */
     a_data = (PDL_Double *) a_pdl->data;
     b_data = (PDL_Double *) b_pdl->data;
     out_data = (PDL_Double *) out_pdl->data;
-    for(int i = 0; i < size; i++) {
+
+    for (i = 0; i < size; i++) {
         out_data[i] = a_data[i] + b_data[i];
     }
 }
 
-# Fast matmul: Basic GEMM-like, extend with BLAS if available
-void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
-    PDL *a_pdl = PDL->SvPDLV(a_sv);
-    PDL *b_pdl = PDL->SvPDLV(b_sv);
-    PDL *out_pdl = PDL->SvPDLV(out_sv);
-    // Assume 2D, row-major; m x k * k x n -> m x n
-    int m = a_pdl->dims[0], k = a_pdl->dims[1], n = b_pdl->dims[1];
-    PDL_Double *a = (PDL_Double *) a_pdl->data;
-    PDL_Double *b = (PDL_Double *) b_pdl->data;
-    PDL_Double *out = (PDL_Double *) out_pdl->data;
-    for(int i = 0; i < m; i++) {
-        for(int j = 0; j < n; j++) {
-            out[i*n + j] = 0;
-            for(int p = 0; p < k; p++) {
-                out[i*n + j] += a[i*k + p] * b[p*n + j];
-            }
-        }
-    }
-}
-
+END_C
+1;
 __END__
 
 =head1 NAME
