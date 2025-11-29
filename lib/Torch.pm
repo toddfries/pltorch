@@ -327,28 +327,6 @@ package Torch::NN::Sequential {
 }
 
 1;
-
-__END__
-
-=head1 NAME
-
-Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
-
-=head1 SYNOPSIS
-
-  use Torch qw(tensor);
-  my $model = Torch::NN::Sequential->new(
-      Torch::NN::Conv2d->new(3, 16, 3),
-      Torch::NN::MaxPool2d->new(2),
-      Torch::NN::Linear->new(16*..., 10),  # Adjust dims
-  );
-  # Train with XS-accelerated ops for speed
-
-=head1 DESCRIPTION
-
-Updated draft adds Conv2d (via PDL conv2d), MaxPool2d, BatchNorm1d, Sigmoid, and Sequential. XS via Inline::C optimizes add/matmul for denser, faster execution than Python equivalents.
-
-=cut
 __DATA__
 __C__
 #include <stdio.h>
@@ -413,3 +391,25 @@ void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
         }
     }
 }
+
+__END__
+
+=head1 NAME
+
+Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
+
+=head1 SYNOPSIS
+
+  use Torch qw(tensor);
+  my $model = Torch::NN::Sequential->new(
+      Torch::NN::Conv2d->new(3, 16, 3),
+      Torch::NN::MaxPool2d->new(2),
+      Torch::NN::Linear->new(16*..., 10),  # Adjust dims
+  );
+  # Train with XS-accelerated ops for speed
+
+=head1 DESCRIPTION
+
+Updated draft adds Conv2d (via PDL conv2d), MaxPool2d, BatchNorm1d, Sigmoid, and Sequential. XS via Inline::C optimizes add/matmul for denser, faster execution than Python equivalents.
+
+=cut

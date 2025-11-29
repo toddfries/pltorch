@@ -21,7 +21,7 @@ WriteMakefile(
         'PDL::NiceSlice'  => '0',
         'PDL::MatrixOps'  => '0',
         'PDL::Image2D'    => '0',      # For Conv2D
-        'Inline::C'       => '0.78',   # For XS optimizations
+        'Inline::C'       => '0.82',   # For XS optimizations
         'Exporter'        => '0',
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
