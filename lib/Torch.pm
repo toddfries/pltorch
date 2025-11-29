@@ -10,7 +10,7 @@ use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
 our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
-use Inline 'C';  # XS integration for speed-critical ops
+use Inline 'C' => 'DATA';  # XS integration for speed-critical ops
 
 # Basic Tensor class, wrapping PDL with autograd
 {
@@ -349,7 +349,31 @@ Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
 Updated draft adds Conv2d (via PDL conv2d), MaxPool2d, BatchNorm1d, Sigmoid, and Sequential. XS via Inline::C optimizes add/matmul for denser, faster execution than Python equivalents.
 
 =cut
+__DATA__
 __C__
+#include <stdio.h>
+
+// Example: Basic weight initialization (mirroring PyTorch's uniform_ but in dense C arrays for efficiency)
+// Allocate a 2D array (rows x cols) and fill with uniform random values in [a, b)
+double** init_weights(int rows, int cols, double a, double b) {
+    double** weights = (double**)malloc(rows * sizeof(double*));
+    for (int i = 0; i < rows; i++) {
+        weights[i] = (double*)malloc(cols * sizeof(double));
+        for (int j = 0; j < cols; j++) {
+            weights[i][j] = a + (b - a) * ((double)rand() / RAND_MAX);
+        }
+    }
+    return weights;
+}
+
+// Free the weights to avoid leaks
+void free_weights(double** weights, int rows) {
+    for (int i = 0; i < rows; i++) {
+        free(weights[i]);
+    }
+    free(weights);
+}
+
 # Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency
 void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
     PDL_Long *dims;
