@@ -6,52 +6,11 @@ use PDL;  # Core for dense, efficient tensor storage and ops
 use PDL::NiceSlice;  # For intuitive slicing
 use PDL::MatrixOps;  # For matrix operations
 use PDL::Image2D;    # Added for Conv2D support
-use Inline 'C';      # XS integration for speed-critical ops
 use Exporter 'import';
 our @EXPORT_OK = qw(tensor);
 our $VERSION = '0.01';  # Initial version; increment as needed for releases
 
-Inline::C->bind(<<'END_C');  # Use heredoc for Inline C to avoid DATA/__END__ parsing issues
-// Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency
-void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
-    PDL_Long *dims;
-    int ndims, size;
-    PDL_Double *a_data, *b_data, *out_data;
-    PDL *a_pdl = PDL->SvPDLV(a_sv);
-    PDL *b_pdl = PDL->SvPDLV(b_sv);
-    PDL *out_pdl = PDL->SvPDLV(out_sv);
-    // Assume matching dims/broadcast; simplified for matching
-    ndims = a_pdl->ndims;
-    dims = a_pdl->dims;
-    size = PDL->nelem(a_pdl);
-    a_data = (PDL_Double *) a_pdl->data;
-    b_data = (PDL_Double *) b_pdl->data;
-    out_data = (PDL_Double *) out_pdl->data;
-    for(int i = 0; i < size; i++) {
-        out_data[i] = a_data[i] + b_data[i];
-    }
-}
-
-// Fast matmul: Basic GEMM-like, extend with BLAS if available
-void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
-    PDL *a_pdl = PDL->SvPDLV(a_sv);
-    PDL *b_pdl = PDL->SvPDLV(b_sv);
-    PDL *out_pdl = PDL->SvPDLV(out_sv);
-    // Assume 2D, row-major; m x k * k x n -> m x n
-    int m = a_pdl->dims[0], k = a_pdl->dims[1], n = b_pdl->dims[1];
-    PDL_Double *a = (PDL_Double *) a_pdl->data;
-    PDL_Double *b = (PDL_Double *) b_pdl->data;
-    PDL_Double *out = (PDL_Double *) out_pdl->data;
-    for(int i = 0; i < m; i++) {
-        for(int j = 0; j < n; j++) {
-            out[i*n + j] = 0;
-            for(int p = 0; p < k; p++) {
-                out[i*n + j] += a[i*k + p] * b[p*n + j];
-            }
-        }
-    }
-}
-END_C
+use Inline 'C';  # XS integration for speed-critical ops
 
 # Basic Tensor class, wrapping PDL with autograd
 {
@@ -390,3 +349,43 @@ Torch - Enhanced Perl PyTorch emulation with more NN layers and XS opts
 Updated draft adds Conv2d (via PDL conv2d), MaxPool2d, BatchNorm1d, Sigmoid, and Sequential. XS via Inline::C optimizes add/matmul for denser, faster execution than Python equivalents.
 
 =cut
+__C__
+# Fast element-wise add: Takes PDL SVs, outputs to result for inplace efficiency
+void fast_add(SV* a_sv, SV* b_sv, SV* out_sv) {
+    PDL_Long *dims;
+    int ndims, size;
+    PDL_Double *a_data, *b_data, *out_data;
+    PDL *a_pdl = PDL->SvPDLV(a_sv);
+    PDL *b_pdl = PDL->SvPDLV(b_sv);
+    PDL *out_pdl = PDL->SvPDLV(out_sv);
+    // Assume matching dims/broadcast; simplified for matching
+    ndims = a_pdl->ndims;
+    dims = a_pdl->dims;
+    size = PDL->nelem(a_pdl);
+    a_data = (PDL_Double *) a_pdl->data;
+    b_data = (PDL_Double *) b_pdl->data;
+    out_data = (PDL_Double *) out_pdl->data;
+    for(int i = 0; i < size; i++) {
+        out_data[i] = a_data[i] + b_data[i];
+    }
+}
+
+# Fast matmul: Basic GEMM-like, extend with BLAS if available
+void fast_matmul(SV* a_sv, SV* b_sv, SV* out_sv) {
+    PDL *a_pdl = PDL->SvPDLV(a_sv);
+    PDL *b_pdl = PDL->SvPDLV(b_sv);
+    PDL *out_pdl = PDL->SvPDLV(out_sv);
+    // Assume 2D, row-major; m x k * k x n -> m x n
+    int m = a_pdl->dims[0], k = a_pdl->dims[1], n = b_pdl->dims[1];
+    PDL_Double *a = (PDL_Double *) a_pdl->data;
+    PDL_Double *b = (PDL_Double *) b_pdl->data;
+    PDL_Double *out = (PDL_Double *) out_pdl->data;
+    for(int i = 0; i < m; i++) {
+        for(int j = 0; j < n; j++) {
+            out[i*n + j] = 0;
+            for(int p = 0; p < k; p++) {
+                out[i*n + j] += a[i*k + p] * b[p*n + j];
+            }
+        }
+    }
+}
